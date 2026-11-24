@@ -7,7 +7,7 @@ const sessions = new WeakMap<Electron.WebContents, Set<string>>()
 const trackedSenders = new WeakSet<Electron.WebContents>()
 
 const assertSender = (event: Electron.IpcMainInvokeEvent) => {
-  if (!isRendererAlive() || event.sender !== getWebContents() || event.senderFrame !== event.sender.mainFrame) {
+  if (!isRendererAlive() || event.sender !== getWebContents() || (event.senderFrame as any) !== (event.sender as any).mainFrame) {
     throw new Error('Untrusted recommendation request')
   }
 }
