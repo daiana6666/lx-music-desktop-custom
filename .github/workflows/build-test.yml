@@ -1,0 +1,50 @@
+name: Run build test
+
+on:
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Eslint check
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Test Build
+        run: npm run build
+
+      - name: Reject tracked ignored files
+        shell: bash
+        run: |
+          ignored=$(git ls-files -ci --exclude-standard -- . ':!:docs/superpowers/**')
+          if [ -n "$ignored" ]; then
+            printf '%s\n' "$ignored"
+            exit 1
+          fi
+
+      - name: Reject unsafe renderer HTML
+        shell: bash
+        run: |
+          if grep -RInE 'v-html|innerHTML' src/renderer; then
+            exit 1
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then exit "$status"; fi
+          fi

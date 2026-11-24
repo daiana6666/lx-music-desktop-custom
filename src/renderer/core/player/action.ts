@@ -1,0 +1,773 @@
+import {
+  isEmpty,
+  playerResourceController,
+  setPause,
+  setPlay,
+  type PlayerResourceController,
+} from '@renderer/plugins/player'
+import {
+  currentPlaybackQuality,
+  isPlay,
+  playedList,
+  playInfo,
+  playMusicInfo,
+  tempPlayList,
+  playbackNotice,
+  musicInfo as _musicInfo,
+} from '@renderer/store/player/state'
+import {
+  getList,
+  clearPlayedList,
+  clearTempPlayeList,
+  setPlayMusicInfo,
+  addPlayedList,
+  setMusicInfo,
+  setAllStatus,
+  removeTempPlayList,
+  setPlayListId,
+  removePlayedList,
+} from '@renderer/store/player/action'
+import { appSetting } from '@renderer/store/setting'
+import { party } from '@renderer/store/party'
+import { getPicPath, getLyricInfo } from '../music/index'
+import { filterList } from './utils'
+import { preloadFailureState } from './preloadState'
+import { getRandom } from '@renderer/utils/index'
+import { addListMusics, removeListMusics } from '@renderer/store/list/action'
+import { loveList } from '@renderer/store/list/state'
+import { addDislikeInfo } from '@renderer/core/dislikeList'
+import { createPlaybackSourceError, isPlaybackSourceError } from '@common/utils/playbackSourceError'
+import {
+  getPlaybackSongIdentity,
+  playbackResolutionCoordinator,
+  type ForegroundCancelReason,
+  type ForegroundPlaybackRequestInput,
+  type PlaybackResolutionCoordinator,
+  type PlaybackResource,
+} from '@renderer/core/music/playback'
+import type { PlaybackPauseReason, PlaybackSelectionOptions, PlaybackSkipReason, PlaybackStartReason } from '@common/storage/playback'
+
+export interface SetMusicUrlOptions {
+  reason?: ForegroundPlaybackRequestInput['reason']
+  startTime?: number
+  shouldPlay?: boolean
+}
+
+interface PlayMusicByInfoOptions extends SetMusicUrlOptions {
+  listId?: string | null
+  isTempPlay?: boolean
+  clearTempList?: boolean
+  startReason?: PlaybackStartReason
+}
+
+export interface PlaybackAdvanceOptions {
+  automatic: boolean
+  reason: PlaybackSkipReason | 'natural_end'
+  startReason: PlaybackStartReason
+  startPositionMs?: number
+}
+
+const emitPlaybackAdvance = ({ automatic, reason }: PlaybackAdvanceOptions): void => {
+  window.app_event.playbackAdvance({ automatic, reason })
+}
+
+const selectionIntent = ({ startReason, startPositionMs = 0 }: Pick<PlaybackAdvanceOptions, 'startReason' | 'startPositionMs'>): PlaybackSelectionOptions => ({
+  startReason,
+  startPositionMs,
+})
+const createMusicIdentity = (musicInfo: LX.Player.PlayMusicInfo['musicInfo'] | LX.Music.MusicInfo | null) => {
+  if (!musicInfo) return ''
+  const targetMusicInfo = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
+  return `${targetMusicInfo.source}:${targetMusicInfo.id}`
+}
+
+const isSameMusicIdentity = (
+  left: LX.Player.PlayMusicInfo['musicInfo'] | LX.Music.MusicInfo | LX.Download.ListItem | null | undefined,
+  right: LX.Player.PlayMusicInfo['musicInfo'] | LX.Music.MusicInfo | LX.Download.ListItem | null | undefined,
+) => createMusicIdentity(left ?? null) === createMusicIdentity(right ?? null)
+
+const normalizeSetMusicUrlOptions = (
+  options: SetMusicUrlOptions = {},
+): Required<SetMusicUrlOptions> => ({
+  reason: options.reason ?? 'initial',
+  startTime: options.startTime ?? 0,
+  shouldPlay: options.shouldPlay ?? true,
+})
+
+const normalizePlayMusicByInfoOptions = (options?: PlayMusicByInfoOptions): Required<PlayMusicByInfoOptions> => {
+  return {
+    reason: options?.reason ?? 'initial',
+    startTime: options?.startTime ?? 0,
+    shouldPlay: options?.shouldPlay ?? true,
+    listId: options?.listId ?? null,
+    isTempPlay: options?.isTempPlay ?? true,
+    clearTempList: options?.clearTempList ?? true,
+    startReason: options?.startReason ?? 'select',
+  }
+}
+
+const createDelayNextTimeout = (delay: number, options: PlaybackAdvanceOptions) => {
+  let timeout: NodeJS.Timeout | null
+  const clearDelayNextTimeout = () => {
+    if (timeout) {
+      clearTimeout(timeout)
+      timeout = null
+    }
+  }
+
+  const addDelayNextTimeout = () => {
+    clearDelayNextTimeout()
+    timeout = setTimeout(() => {
+      timeout = null
+      if (window.lx.isPlayedStop) return
+      console.warn('delay next timeout timeout', delay)
+      void playNext(options)
+    }, delay)
+  }
+
+  return {
+    clearDelayNextTimeout,
+    addDelayNextTimeout,
+  }
+}
+
+const { addDelayNextTimeout, clearDelayNextTimeout } = createDelayNextTimeout(5000, { automatic: true, reason: 'error', startReason: 'auto' })
+const { clearDelayNextTimeout: clearLoadTimeout } = createDelayNextTimeout(100000, { automatic: true, reason: 'load_timeout', startReason: 'auto' })
+
+const getPartyQueueCurrentIndex = () => {
+  const room = party.room
+  if (!room?.playback.queue.length) return -1
+  const currentIdentity = createMusicIdentity(playMusicInfo.musicInfo)
+  if (!currentIdentity) return room.playback.currentIndex
+  const currentIndex = room.playback.queue.findIndex(item => createMusicIdentity(item.musicInfo) === currentIdentity)
+  return currentIndex > -1 ? currentIndex : room.playback.currentIndex
+}
+
+const getPartyQueuePlayMusicInfo = (offset: number): LX.Player.PlayMusicInfo | null => {
+  const room = party.room
+  if (!room?.playback.queue.length) return null
+
+  const currentIndex = getPartyQueueCurrentIndex()
+  let nextIndex = currentIndex
+  if (currentIndex < 0) {
+    if (offset < 0) return null
+    nextIndex = 0
+  } else {
+    nextIndex += offset
+  }
+  if (nextIndex < 0 || nextIndex >= room.playback.queue.length) return null
+
+  return {
+    listId: null,
+    musicInfo: room.playback.queue[nextIndex].musicInfo,
+    isTempPlay: true,
+  }
+}
+
+export interface PlaybackActionController {
+  setMusicUrl: (
+    info: LX.Music.MusicInfo | LX.Download.ListItem,
+    options?: SetMusicUrlOptions,
+  ) => Promise<void>
+  setLoadedMusicIdentity: (identity: string) => void
+  getLoadedMusicIdentity: () => string
+  cancel: (reason: ForegroundCancelReason) => void
+  dispose: () => void
+}
+
+export type CreatePlaybackActionController = (deps: {
+  coordinator: PlaybackResolutionCoordinator
+  resource: PlayerResourceController
+  getCurrentMusicInfo: () => LX.Player.PlayMusicInfo['musicInfo'] | null
+  isPlayedStop: () => boolean
+  autoSkipOnError: () => boolean
+  setAllStatus: (value: string) => void
+  emitVisibleError: () => void
+  reportPlaybackError?: () => void
+  scheduleAutoSkip: () => void
+  clearLoadTimeout: () => void
+  setPlaybackQuality: (value: LX.Quality | null) => void
+}) => PlaybackActionController
+
+export const createPlaybackActionController: CreatePlaybackActionController = deps => {
+  interface ActiveForegroundBinding {
+    token: number
+    songIdentity: string
+    options: Required<SetMusicUrlOptions>
+    terminalFailureEmitted: boolean
+  }
+  let nextToken = 0
+  let active: ActiveForegroundBinding | null = null
+  let loadedMusicIdentity = ''
+
+  const isCurrent = (binding: ActiveForegroundBinding) => {
+    const current = deps.getCurrentMusicInfo()
+    return active === binding && !deps.isPlayedStop() && current != null &&
+      getPlaybackSongIdentity(current) == binding.songIdentity
+  }
+  const bind = (binding: ActiveForegroundBinding, resource: PlaybackResource) => {
+    if (!isCurrent(binding) || resource.songIdentity != binding.songIdentity) return
+    deps.resource.setResource(resource.url, {
+      startTime: binding.options.startTime,
+      shouldPlay: binding.options.shouldPlay,
+      resource,
+      preloadedAudio: deps.coordinator.takePreloadedAudio?.(resource),
+    })
+  }
+  const fail = (binding: ActiveForegroundBinding, error: LX.Playback.SourceError) => {
+    if (!isCurrent(binding) || binding.terminalFailureEmitted ||
+        (error.scope == 'session' && error.kind == 'cancelled')) return
+    binding.terminalFailureEmitted = true
+    deps.setPlaybackQuality(null)
+    deps.clearLoadTimeout()
+    deps.setAllStatus(error.message)
+    deps.reportPlaybackError?.()
+    deps.emitVisibleError()
+    if (deps.autoSkipOnError()) deps.scheduleAutoSkip()
+  }
+  const clearActiveResource = () => {
+    active = null
+    loadedMusicIdentity = ''
+    deps.setPlaybackQuality(null)
+    deps.resource.setStop()
+  }
+  const cancelInternal = (reason: ForegroundCancelReason) => {
+    clearActiveResource()
+    deps.coordinator.cancelForeground(reason)
+  }
+
+  deps.coordinator.setForegroundHandlers({
+    resource(resource) {
+      const binding = active
+      if (binding) bind(binding, resource)
+    },
+    failure({ songIdentity, error }) {
+      const binding = active
+      if (binding?.songIdentity == songIdentity) fail(binding, error)
+    },
+  })
+
+  return {
+    async setMusicUrl(info, options = {}) {
+      deps.setPlaybackQuality(null)
+      const normalized = normalizeSetMusicUrlOptions(options)
+      const binding: ActiveForegroundBinding = {
+        token: ++nextToken,
+        songIdentity: getPlaybackSongIdentity(info),
+        options: normalized,
+        terminalFailureEmitted: false,
+      }
+      active = binding
+      loadedMusicIdentity = ''
+      deps.resource.setStop()
+      try {
+        const resource = await deps.coordinator.startForeground({
+          musicInfo: info,
+          reason: normalized.reason,
+        })
+        bind(binding, resource)
+      } catch (error) {
+        fail(binding, isPlaybackSourceError(error) ? error : createPlaybackSourceError({
+          message: error instanceof Error ? error.message : 'Playback resolution failed',
+          scope: 'candidate',
+          kind: 'request',
+          cause: error,
+        }))
+      }
+    },
+    setLoadedMusicIdentity(identity) { loadedMusicIdentity = identity },
+    getLoadedMusicIdentity: () => loadedMusicIdentity,
+    cancel(reason) { cancelInternal(reason) },
+    dispose() {
+      clearActiveResource()
+      deps.coordinator.dispose()
+    },
+  }
+}
+
+let actionControllerInstance: PlaybackActionController | null = null
+
+const requireActionController = (): PlaybackActionController => {
+  if (!actionControllerInstance) throw new Error('Playback action controller is not initialized')
+  return actionControllerInstance
+}
+
+export const initializePlaybackActionController = (): PlaybackActionController => {
+  actionControllerInstance ??= createPlaybackActionController({
+    coordinator: playbackResolutionCoordinator,
+    resource: playerResourceController,
+    getCurrentMusicInfo: () => playMusicInfo.musicInfo,
+    isPlayedStop: () => window.lx.isPlayedStop,
+    autoSkipOnError: () => appSetting['player.autoSkipOnError'],
+    setAllStatus,
+    emitVisibleError: () => window.app_event.error(),
+    reportPlaybackError: () => {
+      const info = playMusicInfo.musicInfo
+      if (info) {
+        const name = 'progress' in info ? info.metadata.musicInfo.name : info.name
+        playbackNotice.value = window.i18n.t('player__unplayable', { name })
+      }
+      window.app_event.playbackError({ stage: 'url', code: null, recoverable: false, attempt: 1 })
+    },
+    scheduleAutoSkip: addDelayNextTimeout,
+    clearLoadTimeout,
+    setPlaybackQuality: value => { currentPlaybackQuality.value = value },
+  })
+  return actionControllerInstance
+}
+
+export const disposePlaybackActionController = () => {
+  actionControllerInstance?.dispose()
+  actionControllerInstance = null
+}
+
+export const setMusicUrl: PlaybackActionController['setMusicUrl'] = async(...args) => (
+  requireActionController().setMusicUrl(...args)
+)
+export const setLoadedMusicIdentity = (identity: string) => { requireActionController().setLoadedMusicIdentity(identity) }
+export const getLoadedMusicIdentity = () => requireActionController().getLoadedMusicIdentity()
+
+const loadMusicMeta = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, listId: string | null) => {
+  void getPicPath({ musicInfo, listId }).then((url: string) => {
+    if (!isSameMusicIdentity(musicInfo, playMusicInfo.musicInfo) || url == _musicInfo.pic) return
+    setMusicInfo({ pic: url })
+    window.app_event.picUpdated()
+  }).catch(_ => _)
+
+  void getLyricInfo({ musicInfo }).then(lyricInfo => {
+    if (!isSameMusicIdentity(musicInfo, playMusicInfo.musicInfo)) return
+    setMusicInfo({
+      lrc: lyricInfo.lyric,
+      tlrc: lyricInfo.tlyric,
+      lxlrc: lyricInfo.lxlyric,
+      rlrc: lyricInfo.rlyric,
+      rawlrc: lyricInfo.rawlrcInfo.lyric,
+    })
+    window.app_event.lyricUpdated()
+  }).catch(err => {
+    console.log(err)
+    if (!isSameMusicIdentity(musicInfo, playMusicInfo.musicInfo)) return
+    setAllStatus(window.i18n.t('lyric__load_error'))
+  })
+}
+
+const handleRestorePlay = async(restorePlayInfo: LX.Player.SavedPlayInfo) => {
+  const currentMusicInfo = playMusicInfo.musicInfo
+  if (!currentMusicInfo) return
+
+  setImmediate(() => {
+    if (!isSameMusicIdentity(currentMusicInfo, playMusicInfo.musicInfo)) return
+    window.app_event.setProgress(appSetting['player.isSavePlayTime'] ? restorePlayInfo.time : 0, 'restore', restorePlayInfo.maxTime)
+    window.app_event.pause()
+  })
+
+  loadMusicMeta(currentMusicInfo, playMusicInfo.listId)
+
+  if (appSetting['player.togglePlayMethod'] == 'random' && !playMusicInfo.isTempPlay) {
+    addPlayedList({ ...playMusicInfo as LX.Player.PlayMusicInfo })
+  }
+}
+
+const handlePlay = (options?: SetMusicUrlOptions) => {
+  window.lx.isPlayedStop &&= false
+
+  resetRandomNextMusicInfo()
+  if (window.lx.restorePlayInfo) {
+    void handleRestorePlay(window.lx.restorePlayInfo)
+    window.lx.restorePlayInfo = null
+    return
+  }
+
+  const currentMusicInfo = playMusicInfo.musicInfo
+  if (!currentMusicInfo) return
+
+  window.app_event.pause()
+  clearDelayNextTimeout()
+  clearLoadTimeout()
+
+  if (appSetting['player.togglePlayMethod'] == 'random' && !playMusicInfo.isTempPlay) {
+    addPlayedList({ ...(playMusicInfo as LX.Player.PlayMusicInfo) })
+  }
+
+  void setMusicUrl(currentMusicInfo, options)
+  loadMusicMeta(currentMusicInfo, playMusicInfo.listId)
+}
+
+const resetPreloadFailures = () => {
+  preloadFailureState.reset()
+  playbackNotice.value = ''
+}
+
+export const playListById = (listId: string, id: string) => {
+  resetPreloadFailures()
+  const prevListId = playInfo.playerListId
+  setPlayListId(listId)
+  const currentMusicInfo = getList(listId).find(m => m.id == id)
+  if (!currentMusicInfo) return
+  window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
+  setPlayMusicInfo(listId, currentMusicInfo, false, { startReason: 'select', startPositionMs: 0 })
+  if (appSetting['player.isAutoCleanPlayedList'] || prevListId != listId) clearPlayedList()
+  clearTempPlayeList()
+  handlePlay()
+}
+
+export const playList = (
+  listId: string,
+  index: number,
+  advanceOptions: PlaybackAdvanceOptions = { automatic: false, reason: 'select', startReason: 'select' },
+) => {
+  resetPreloadFailures()
+  const prevListId = playInfo.playerListId
+  setPlayListId(listId)
+  emitPlaybackAdvance(advanceOptions)
+  setPlayMusicInfo(listId, getList(listId)[index], false, selectionIntent(advanceOptions))
+  if (appSetting['player.isAutoCleanPlayedList'] || prevListId != listId) clearPlayedList()
+  clearTempPlayeList()
+  handlePlay()
+}
+
+export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMusicByInfoOptions) => {
+  resetPreloadFailures()
+  const normalizedOptions = normalizePlayMusicByInfoOptions(options)
+  if (normalizedOptions.listId != null || !normalizedOptions.isTempPlay) {
+    setPlayListId(normalizedOptions.listId)
+  }
+  window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
+  setPlayMusicInfo(normalizedOptions.listId, musicInfo, normalizedOptions.isTempPlay, {
+    startReason: normalizedOptions.startReason,
+    startPositionMs: normalizedOptions.startTime * 1000,
+  })
+  if (normalizedOptions.clearTempList) clearTempPlayeList()
+  handlePlay({
+    reason: normalizedOptions.reason,
+    startTime: normalizedOptions.startTime,
+    shouldPlay: normalizedOptions.shouldPlay,
+  })
+}
+
+const handleToggleStop = (options: PlaybackAdvanceOptions) => {
+  if (playMusicInfo.musicInfo) emitPlaybackAdvance(options)
+  stop()
+  setTimeout(() => {
+    setPlayMusicInfo(null, null)
+  })
+}
+
+const randomNextMusicInfo = {
+  info: null as LX.Player.PlayMusicInfo | null,
+}
+
+export const resetRandomNextMusicInfo = () => {
+  if (randomNextMusicInfo.info) randomNextMusicInfo.info = null
+}
+
+const selectNextPlayMusicInfo = async(
+  excluded: ReadonlySet<string>,
+  automatic: boolean,
+  preview: boolean,
+  onEmptyList: () => void,
+): Promise<LX.Player.PlayMusicInfo | null> => {
+  const allowed = (info: LX.Player.PlayMusicInfo) => !excluded.has(getPlaybackSongIdentity(info.musicInfo))
+  const partyNext = getPartyQueuePlayMusicInfo(1)
+  if (partyNext) {
+    for (let offset = 1; offset <= (party.room?.playback.queue.length ?? 0); offset++) {
+      const next = getPartyQueuePlayMusicInfo(offset)
+      if (!next) break
+      if (allowed(next)) return next
+    }
+    return null
+  }
+
+  const temporary = tempPlayList.find(allowed)
+  if (temporary) return temporary
+  if (playMusicInfo.musicInfo == null) return null
+
+  const currentMusic = playMusicInfo.musicInfo
+  const currentListId = playInfo.playerListId
+  if (!currentListId) return null
+  const currentList = getList(currentListId)
+  if (randomNextMusicInfo.info) {
+    const cached = randomNextMusicInfo.info
+    if (cached.listId == currentListId && allowed(cached) &&
+        currentList.some(info => getPlaybackSongIdentity(info) == getPlaybackSongIdentity(cached.musicInfo))) return cached
+    resetRandomNextMusicInfo()
+  }
+
+  if (playedList.length) {
+    let currentId: string
+    if (playMusicInfo.isTempPlay) {
+      const currentMusicInfo = currentList[playInfo.playerPlayIndex]
+      if (currentMusicInfo) currentId = currentMusicInfo.id
+    } else {
+      currentId = playMusicInfo.musicInfo.id
+    }
+
+    let index
+    for (index = playedList.findIndex(m => m.musicInfo.id === currentId) + 1; index < playedList.length; index++) {
+      const currentPlayMusicInfo = playedList[index]
+      const playedMusicId = currentPlayMusicInfo.musicInfo.id
+      if (currentPlayMusicInfo.listId == currentListId && !currentList.some(m => m.id === playedMusicId)) {
+        if (!preview) removePlayedList(index--)
+        continue
+      }
+      if (allowed(currentPlayMusicInfo)) return currentPlayMusicInfo
+    }
+  }
+
+  let { filteredList, playerIndex } = await filterList({
+    listId: currentListId,
+    list: currentList,
+    playedList,
+    playerMusicInfo: currentList[playInfo.playerPlayIndex],
+    isNext: true,
+    preview,
+  })
+
+  if (playMusicInfo.musicInfo != currentMusic || playInfo.playerListId != currentListId) return null
+  if (!filteredList.length) {
+    onEmptyList()
+    return null
+  }
+  if (playerIndex == -1 && filteredList.length) playerIndex = 0
+  let nextIndex = playerIndex
+
+  let togglePlayMethod = appSetting['player.togglePlayMethod']
+  if (!automatic && ['list', 'singleLoop', 'none'].includes(togglePlayMethod)) togglePlayMethod = 'listLoop'
+  switch (togglePlayMethod) {
+    case 'listLoop':
+      nextIndex = playerIndex === filteredList.length - 1 ? 0 : playerIndex + 1
+      break
+    case 'random':
+      filteredList = filteredList.filter(info => !excluded.has(getPlaybackSongIdentity(info)))
+      if (!filteredList.length) return null
+      nextIndex = getRandom(0, filteredList.length)
+      break
+    case 'list':
+      nextIndex = playerIndex === filteredList.length - 1 ? -1 : playerIndex + 1
+      break
+    case 'singleLoop':
+      break
+    default:
+      return null
+  }
+  if (nextIndex < 0) return null
+
+  for (let checked = 0; excluded.has(getPlaybackSongIdentity(filteredList[nextIndex])); checked++) {
+    if (togglePlayMethod == 'singleLoop' || checked >= filteredList.length - 1) return null
+    nextIndex++
+    if (nextIndex == filteredList.length) {
+      if (togglePlayMethod == 'list') return null
+      nextIndex = 0
+    }
+  }
+
+  const nextPlayMusicInfo = {
+    musicInfo: filteredList[nextIndex],
+    listId: currentListId,
+    isTempPlay: false,
+  }
+
+  if (togglePlayMethod == 'random') randomNextMusicInfo.info = nextPlayMusicInfo
+  return nextPlayMusicInfo
+}
+
+export const getNextPlayMusicInfo = async(
+  excluded: ReadonlySet<string> = new Set(),
+  automatic = true,
+): Promise<LX.Player.PlayMusicInfo | null> => selectNextPlayMusicInfo(excluded, automatic, true, () => {})
+
+const handlePlayNext = (nextPlayMusicInfo: LX.Player.PlayMusicInfo, options: PlaybackAdvanceOptions) => {
+  emitPlaybackAdvance(options)
+  setPlayMusicInfo(
+    nextPlayMusicInfo.listId,
+    nextPlayMusicInfo.musicInfo,
+    nextPlayMusicInfo.isTempPlay,
+    selectionIntent(options),
+  )
+  handlePlay()
+}
+
+export const playNext = async(
+  options: PlaybackAdvanceOptions = { automatic: false, reason: 'next', startReason: 'next' },
+): Promise<void> => {
+  const usePreload = appSetting['player.preloadNext'] && appSetting['player.autoSkipOnError']
+  if (!options.automatic && preloadFailureState.stopped) resetPreloadFailures()
+  if (usePreload && options.automatic && ['error', 'load_timeout', 'buffer_timeout'].includes(options.reason)) {
+    const current = playMusicInfo.musicInfo
+    if (current) {
+      preloadFailureState.add(current)
+      const name = 'progress' in current ? current.metadata.musicInfo.name : current.name
+      playbackNotice.value = window.i18n.t('player__unplayable_skipped', { name })
+    }
+  }
+  if (usePreload && preloadFailureState.stopped) {
+    stop()
+    playbackNotice.value = window.i18n.t('player__preload_stopped')
+    return
+  }
+  const excluded = new Set(usePreload ? preloadFailureState.failed : [])
+  // Do not wrap back to the current song after exhausting the other candidates.
+  if (excluded.size && playMusicInfo.musicInfo) excluded.add(getPlaybackSongIdentity(playMusicInfo.musicInfo))
+  const current = playMusicInfo.musicInfo
+  const listId = playInfo.playerListId
+  let emptyList = false
+  const next = await selectNextPlayMusicInfo(excluded, options.automatic, false, () => { emptyList = true })
+  if (current != playMusicInfo.musicInfo || listId != playInfo.playerListId) return
+  if (!next) {
+    if (excluded.size) {
+      stop()
+      playbackNotice.value = window.i18n.t('player__preload_exhausted')
+    } else if (!current || !listId || emptyList) handleToggleStop(options)
+    return
+  }
+  const temporaryIndex = tempPlayList.indexOf(next)
+  if (temporaryIndex >= 0) {
+    for (let index = 0; index <= temporaryIndex; index++) removeTempPlayList(0)
+  } else if (usePreload) {
+    while (tempPlayList.length && excluded.has(getPlaybackSongIdentity(tempPlayList[0].musicInfo))) removeTempPlayList(0)
+  }
+  handlePlayNext(next, options)
+}
+
+export const playPrev = async(
+  options: PlaybackAdvanceOptions = { automatic: false, reason: 'previous', startReason: 'previous' },
+): Promise<void> => {
+  resetPreloadFailures()
+  const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(-1)
+  if (partyQueuePlayMusicInfo) {
+    handlePlayNext(partyQueuePlayMusicInfo, options)
+    return
+  }
+
+  if (playMusicInfo.musicInfo == null) {
+    handleToggleStop(options)
+    return
+  }
+
+  const currentListId = playInfo.playerListId
+  if (!currentListId) {
+    handleToggleStop(options)
+    return
+  }
+  const currentList = getList(currentListId)
+
+  if (playedList.length) {
+    let currentId: string
+    if (playMusicInfo.isTempPlay) {
+      const currentMusicInfo = currentList[playInfo.playerPlayIndex]
+      if (currentMusicInfo) currentId = currentMusicInfo.id
+    } else {
+      currentId = playMusicInfo.musicInfo.id
+    }
+
+    let index
+    for (index = playedList.findIndex(m => m.musicInfo.id === currentId) - 1; index > -1; index--) {
+      const currentPlayMusicInfo = playedList[index]
+      const playedMusicId = currentPlayMusicInfo.musicInfo.id
+      if (currentPlayMusicInfo.listId == currentListId && !currentList.some(m => m.id === playedMusicId)) {
+        removePlayedList(index)
+        continue
+      }
+      break
+    }
+
+    if (index > -1) {
+      handlePlayNext(playedList[index], options)
+      return
+    }
+  }
+
+  let { filteredList, playerIndex } = await filterList({
+    listId: currentListId,
+    list: currentList,
+    playedList,
+    playerMusicInfo: currentList[playInfo.playerPlayIndex],
+    isNext: false,
+  })
+  if (!filteredList.length) {
+    handleToggleStop(options)
+    return
+  }
+
+  if (playerIndex == -1 && filteredList.length) playerIndex = 0
+  let nextIndex = playerIndex
+  if (!playMusicInfo.isTempPlay) {
+    let togglePlayMethod = appSetting['player.togglePlayMethod']
+    if (!options.automatic) {
+      switch (togglePlayMethod) {
+        case 'list':
+        case 'singleLoop':
+        case 'none':
+          togglePlayMethod = 'listLoop'
+      }
+    }
+    switch (togglePlayMethod) {
+      case 'random':
+        nextIndex = getRandom(0, filteredList.length)
+        break
+      case 'listLoop':
+      case 'list':
+        nextIndex = playerIndex === 0 ? filteredList.length - 1 : playerIndex - 1
+        break
+      case 'singleLoop':
+        break
+      default:
+        return
+    }
+    if (nextIndex < 0) return
+  }
+
+  handlePlayNext({
+    musicInfo: filteredList[nextIndex],
+    listId: currentListId,
+    isTempPlay: false,
+  }, options)
+}
+
+export const play = (reason: PlaybackPauseReason = 'user') => {
+  window.lx.isPlayedStop &&= false
+  if (playMusicInfo.musicInfo == null) return
+  if (reason == 'user') window.app_event.playbackNewAttempt()
+  window.app_event.playbackResumeRequested(reason)
+  if (isEmpty()) {
+    void setMusicUrl(playMusicInfo.musicInfo)
+    return
+  }
+  setPlay()
+}
+
+export const pause = (reason: PlaybackPauseReason = 'user') => {
+  window.app_event.playbackPauseRequested(reason)
+  setPause()
+}
+
+export const stop = () => {
+  requireActionController().cancel('stop')
+  setTimeout(() => {
+    window.app_event.stop()
+  })
+}
+
+export const togglePlay = () => {
+  window.lx.isPlayedStop &&= false
+  if (isPlay.value) pause()
+  else play()
+}
+
+export const collectMusic = () => {
+  if (!playMusicInfo.musicInfo) return
+  void addListMusics(loveList.id, ['progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo])
+}
+
+export const uncollectMusic = () => {
+  if (!playMusicInfo.musicInfo) return
+  if (playMusicInfo.listId == loveList.id) playMusicInfo.isTempPlay = true
+  void removeListMusics({ listId: loveList.id, ids: ['progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo.id : playMusicInfo.musicInfo.id] })
+}
+
+export const dislikeMusic = async() => {
+  if (!playMusicInfo.musicInfo) return
+  const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo
+  await addDislikeInfo([{ name: currentMusicInfo.name, singer: currentMusicInfo.singer }])
+  await playNext({ automatic: true, reason: 'dislike', startReason: 'auto' })
+}

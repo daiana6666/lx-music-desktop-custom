@@ -1,0 +1,372 @@
+<template>
+  <div :class="$style.main">
+    <div class="scroll" :class="$style.toc">
+      <ul :class="$style.tocList" role="toolbar">
+        <li v-for="h2 in tocList" :key="h2.id" :class="$style.tocListItem" role="presentation">
+          <h2
+            :class="[$style.tocH2, {[$style.active]: avtiveComponentName == h2.id }]"
+            role="tab" tabindex="0" :aria-selected="avtiveComponentName == h2.id"
+            :aria-label="h2.title" ignore-tip @click="toggleTab(h2.id)" @keydown.enter="toggleTab(h2.id)" @keydown.space.prevent="toggleTab(h2.id)"
+          >
+            <transition name="list-active">
+              <svg-icon v-if="avtiveComponentName == h2.id" name="angle-right-solid" :class="$style.activeIcon" />
+            </transition>
+            {{ h2.title }}
+          </h2>
+          <!-- <ul v-if="h2.children.length" :class="$style.tocList">
+            <li v-for="h3 in h2.children" :key="h3.id" :class="$style.tocSubListItem">
+              <h3 :class="[$style.tocH3, toc.activeId == h3.id ? $style.active : null]" :aria-label="h3.title">
+                <a :href="'#' + h3.id" @click.stop="toc.activeId = h3.id">{{ h3.title }}</a>
+              </h3>
+            </li>
+          </ul> -->
+        </li>
+      </ul>
+    </div>
+    <div ref="dom_content_ref" class="scroll" :class="$style.setting">
+      <dl>
+        <component :is="avtiveComponentName" />
+        <!-- <SettingBasic />
+        <SettingPlay />
+        <SettingPlayDetail />
+        <SettingDesktopLyric />
+        <SettingList />
+        <SettingDownload />
+        <SettingSync />
+        <SettingHotKey />
+        <SettingNetwork />
+        <SettingBackup />
+        <SettingOther />
+        <SettingAbout /> -->
+      </dl>
+    </div>
+  </div>
+</template>
+
+<script>
+import { ref, computed, nextTick, watch, defineAsyncComponent } from '@common/utils/vueTools'
+// import { currentStting } from './setting'
+import { useI18n } from '@renderer/plugins/i18n'
+import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from '@common/utils/vueRouter'
+import { requestPerformanceLeave } from '@renderer/store/performance'
+
+const SettingBasic = defineAsyncComponent(async() => import('./components/SettingBasic.vue'))
+const SettingPlay = defineAsyncComponent(async() => import('./components/SettingPlay.vue'))
+const SettingPlayDetail = defineAsyncComponent(async() => import('./components/SettingPlayDetail.vue'))
+const SettingDesktopLyric = defineAsyncComponent(async() => import('./components/SettingDesktopLyric.vue'))
+const SettingRecommend = defineAsyncComponent(async() => import('./components/SettingRecommend.vue'))
+const SettingList = defineAsyncComponent(async() => import('./components/SettingList.vue'))
+const SettingLocalMusic = defineAsyncComponent(async() => import('./components/SettingLocalMusic.vue'))
+const SettingDownload = defineAsyncComponent(async() => import('./components/SettingDownload.vue'))
+const SettingSync = defineAsyncComponent(async() => import('./components/SettingSync/index.vue'))
+const SettingOpenAPI = defineAsyncComponent(async() => import('./components/SettingOpenAPI.vue'))
+const SettingHotKey = defineAsyncComponent(async() => import('./components/SettingHotKey.vue'))
+const SettingNetwork = defineAsyncComponent(async() => import('./components/SettingNetwork.vue'))
+const SettingBackup = defineAsyncComponent(async() => import('./components/SettingBackup.vue'))
+const SettingOther = defineAsyncComponent(async() => import('./components/SettingOther.vue'))
+const SettingListeningTime = defineAsyncComponent(async() => import('./components/SettingListeningTime.vue'))
+const SettingAbout = defineAsyncComponent(async() => import('./components/SettingAbout.vue'))
+
+const SettingPerformance = defineAsyncComponent(async() => import('./components/SettingPerformance.vue'))
+
+export default {
+  name: 'Setting',
+  components: {
+    SettingPerformance,
+    SettingBasic,
+    SettingPlay,
+    SettingPlayDetail,
+    SettingDesktopLyric,
+    SettingRecommend,
+    SettingList,
+    SettingLocalMusic,
+    SettingDownload,
+    SettingSync,
+    SettingOpenAPI,
+    SettingHotKey,
+    SettingNetwork,
+    SettingBackup,
+    SettingOther,
+    SettingListeningTime,
+    SettingAbout,
+  },
+  setup() {
+    const t = useI18n()
+    const route = useRoute()
+    const router = useRouter()
+
+    const dom_content_ref = ref(null)
+
+    const tocList = computed(() => {
+      return [
+        { id: 'SettingBasic', title: t('setting__basic') },
+        { id: 'SettingPerformance', title: t('setting__performance') },
+        { id: 'SettingPlay', title: t('setting__play') },
+        { id: 'SettingPlayDetail', title: t('setting__play_detail') },
+        { id: 'SettingDesktopLyric', title: t('setting__desktop_lyric') },
+        { id: 'SettingRecommend', title: t('setting__recommend') },
+        { id: 'SettingList', title: t('setting__list') },
+        { id: 'SettingLocalMusic', title: t('setting__local_music_webdav') },
+        { id: 'SettingDownload', title: t('setting__download') },
+        { id: 'SettingHotKey', title: t('setting__hot_key') },
+        { id: 'SettingSync', title: t('setting__sync') },
+        { id: 'SettingOpenAPI', title: t('setting__open_api') },
+        { id: 'SettingNetwork', title: t('setting__network') },
+        { id: 'SettingBackup', title: t('setting__backup') },
+        { id: 'SettingOther', title: t('setting__other') },
+        { id: 'SettingListeningTime', title: '听歌时间' },
+        { id: 'SettingAbout', title: t('setting__about') },
+      ]
+    })
+
+    const getRouteComponentName = () => {
+      const name = Array.isArray(route.query.name) ? route.query.name[0] : route.query.name
+      return name && tocList.value.some(t => t.id == name) ? name : null
+    }
+
+    const avtiveComponentName = ref(getRouteComponentName()
+      ? getRouteComponentName()
+      : tocList.value[0].id)
+
+    const canLeave = async() => avtiveComponentName.value == 'SettingPerformance' ? requestPerformanceLeave() : true
+    onBeforeRouteLeave(canLeave)
+    onBeforeRouteUpdate(canLeave)
+
+    const toggleTab = async id => {
+      await router.replace({ path: '/setting', query: { ...route.query, name: id } })
+    }
+    const activateTab = id => {
+      avtiveComponentName.value = id
+      void nextTick(() => {
+        dom_content_ref.value?.scrollTo({
+          top: 0,
+          behavior: 'smooth',
+        })
+      })
+    }
+
+    watch(() => route.query.name, () => {
+      const name = getRouteComponentName()
+      if (!name || avtiveComponentName.value == name) return
+      activateTab(name)
+    })
+
+    return {
+      tocList,
+      avtiveComponentName,
+      dom_content_ref,
+      toggleTab,
+    }
+  },
+  // mounted() {
+  //   this.initTOC()
+  // },
+  // methods: {
+  //   initTOC() {
+  //     const list = this.$refs.dom_setting_list.children
+  //     const toc = []
+  //     let prevTitle
+  //     for (const item of list) {
+  //       if (item.tagName == 'DT') {
+  //         prevTitle = {
+  //           title: item.innerText.replace(/[（(].+?[)）]/, ''),
+  //           id: item.getAttribute('id'),
+  //           dom: item,
+  //           children: [],
+  //         }
+  //         toc.push(prevTitle)
+  //         continue
+  //       }
+  //       const h3 = item.querySelector('h3')
+  //       if (h3) {
+  //         prevTitle.children.push({
+  //           title: h3.innerText.replace(/[（(].+?[)）]/, ''),
+  //           id: h3.getAttribute('id'),
+  //           dom: h3,
+  //         })
+  //       }
+  //     }
+  //     console.log(toc)
+  //     this.toc.list = toc
+  //   },
+  //   handleListScroll(event) {
+  //     // console.log(event.target.scrollTop)
+  //   },
+  // },
+}
+</script>
+
+<style lang="less" module>
+@import '@renderer/assets/styles/layout.less';
+
+.main {
+  display: flex;
+  flex-flow: row nowrap;
+  height: 100%;
+  border-top: var(--color-list-header-border-bottom);
+}
+
+.toc {
+  flex: 0 0 16%;
+  overflow-y: scroll;
+}
+.tocH2 {
+  line-height: 1.5;
+  .mixin-ellipsis-1();
+  font-size: 13px;
+  color: var(--color-font);
+  padding: 8px 10px;
+  transition: @transition-fast;
+  transition-property: background-color, color;
+
+  &:not(.active) {
+    cursor: pointer;
+    &:hover {
+      background-color: var(--color-button-background-hover);
+    }
+  }
+  &.active {
+    color: var(--color-primary);
+  }
+}
+.activeIcon {
+  height: .9em;
+  width: .9em;
+  margin-left: -0.45em;
+  vertical-align: -0.05em;
+}
+// .tocH3 {
+//   font-size: 13px;
+//   opacity: .8;
+// }
+
+// .tocList {
+//   .tocList {
+//     // padding-left: 15px;
+//   }
+// }
+// .tocSubListItem {
+//   padding-top: 10px;
+// }
+
+.setting {
+  padding: 14px 20px 22px;
+  font-size: 14px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  height: 100%;
+  position: relative;
+  width: 100%;
+
+  :global {
+    dl {
+      max-width: 980px;
+      margin: 0;
+    }
+
+    dt {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--color-font);
+      font-size: 20px;
+      font-weight: 750;
+      line-height: 1.2;
+      padding: 0;
+      margin: 12px 0 12px;
+
+      + dd h3 {
+        margin-top: 0;
+      }
+
+      &::before {
+        content: '';
+        display: block;
+        width: 5px;
+        height: 24px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, var(--color-primary), var(--color-primary-light-300));
+      }
+    }
+
+    dd {
+      margin: 0 0 14px;
+      padding: 26px 30px;
+      border: 1px solid var(--color-primary-alpha-800);
+      border-radius: 8px;
+      background: var(--color-surface-background);
+      box-shadow: var(--shadow-soft);
+      box-sizing: border-box;
+      transition: @transition-fast;
+      transition-property: border-color, background-color, box-shadow;
+
+      &:hover {
+        border-color: var(--color-primary-alpha-700);
+        background: var(--color-surface-background-hover);
+      }
+
+      > div {
+        padding: 0;
+      }
+
+    }
+    h3 {
+      color: var(--color-font);
+      font-size: 16px;
+      line-height: 1.35;
+      font-weight: 720;
+      margin: 0 0 22px;
+    }
+    .p {
+      padding: 5px 0;
+      line-height: 1.55;
+      .btn {
+        + .btn {
+          margin-left: 10px;
+        }
+      }
+    }
+
+    .help-btn {
+      padding: 0;
+      margin: 0 0.4em;
+      border: none;
+      background: none;
+      color: var(--color-button-font);
+      cursor: pointer;
+      transition: opacity 0.2s ease;
+      &:hover {
+        opacity: 0.7;
+      }
+    }
+    .help-icon {
+      margin: 0 0.4em;
+    }
+  }
+}
+
+// .btn-content {
+//   display: inline-block;
+//   transition: @transition-theme;
+//   transition-property: opacity, transform;
+//   opacity: 1;
+//   transform: scale(1);
+
+//   &.hide {
+//     opacity: 0;
+//     transform: scale(0);
+//   }
+// }
+
+
+// :global(dt):target, :global(h3):target {
+//   animation: highlight 1s ease;
+// }
+
+// @keyframes highlight {
+//   from { background: yellow; }
+//   to { background: transparent; }
+// }
+
+</style>
+

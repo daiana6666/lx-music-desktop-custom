@@ -1,0 +1,487 @@
+import { encodePath, isUrl, throttle } from '@common/utils'
+import migrateSetting from '@common/utils/migrateSetting'
+import getStore from '@main/utils/store'
+import { STORE_NAMES, URL_SCHEME_RXP } from '@common/constants'
+import defaultSetting from '@common/defaultSetting'
+import defaultHotKey from '@common/defaultHotKey'
+import { migrateHotKey, migrateUserApi, parseDataFile } from './migrate'
+import { nativeTheme, powerSaveBlocker } from 'electron'
+import { joinPath } from '@common/utils/nodejs'
+import themes from '@common/theme/index.json'
+import { normalizeWebDAVRootUrl } from '@common/utils/webdavUrl'
+import { type CatalogPreferencesV1 } from '@common/storage/stateContracts'
+import {
+  parseSettingsDocument,
+  replaceCatalogPreferences,
+  replaceOrdinarySettings,
+  type SettingsDocumentV1,
+} from '@main/storage/settings/document'
+import { normalizePlaybackSourceSetting } from '@common/utils/playbackSourceSetting'
+import type { ThemeAssetManager } from '@main/services/themeAssetManager'
+import { migratePerformanceSettings, normalizePerformancePatch } from '@common/performance/featurePolicy'
+
+export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
+  const cmdParams: LX.CmdParams = {}
+  let deeplink = null
+  const rx = /^-\w+/
+  for (let param of argv) {
+    if (URL_SCHEME_RXP.test(param)) {
+      deeplink = param
+    }
+
+    if (!rx.test(param)) continue
+    param = param.substring(1)
+    let index = param.indexOf('=')
+    if (index < 0) {
+      cmdParams[param] = true
+    } else {
+      cmdParams[param.substring(0, index)] = param.substring(index + 1)
+    }
+  }
+  return {
+    cmdParams,
+    deeplink,
+  }
+}
+
+const primitiveType = ['string', 'boolean', 'number']
+const checkPrimitiveType = (val: any): boolean => val === null || primitiveType.includes(typeof val)
+const checkSettingValueType = (val: any): boolean => checkPrimitiveType(val) || Array.isArray(val)
+const checkSameSettingValue = (a: any, b: any): boolean => {
+  if (!Array.isArray(a) || !Array.isArray(b)) return a == b
+  if (a.length != b.length) return false
+  return a.every((value, index) => value == b[index])
+}
+
+const webDAVCredentialSettingKeys = ['webdav.username', 'webdav.password'] as const
+
+export const sanitizeSettingUpdate = (setting?: Partial<LX.AppSetting>): Partial<LX.AppSetting> | undefined => {
+  if (setting == null) return setting
+  const sanitized = { ...setting }
+  for (const key of webDAVCredentialSettingKeys) Reflect.deleteProperty(sanitized, key)
+  if (Object.hasOwn(sanitized, 'webdav.url')) {
+    try {
+      normalizeWebDAVRootUrl(sanitized['webdav.url'])
+    } catch {
+      throw new Error('Invalid WebDAV URL')
+    }
+  }
+  return sanitized
+}
+
+const assertNoWebDAVCredentialWrite = (setting?: Partial<LX.AppSetting>): void => {
+  if (setting == null) return
+  for (const key of webDAVCredentialSettingKeys) {
+    if (Object.hasOwn(setting, key) && setting[key] !== '') {
+      throw new Error('WebDAV credentials cannot be written through settings')
+    }
+  }
+}
+// const handleMergeSetting = (defaultSetting: LX.AppSetting, currentSetting: Partial<LX.AppSetting>) => {
+//   const updatedSettingKeys: Array<keyof LX.AppSetting> = []
+//   for (const key of Object.keys(defaultSetting) as Array<keyof LX.AppSetting>) {
+//     const currentValue: any = currentSetting[key]
+//     const isPrimitive = checkPrimitiveType(currentValue)
+//     // if (checkPrimitiveType(value)) {
+//     if (!isPrimitive) continue
+//     updatedSettingKeys.push(key)
+//     // @ts-expect-error
+//     defaultSetting[key] = currentValue
+//     // } else {
+//     //   if (!isPrimitive && currentValue != undefined) handleMergeSetting(value, currentValue)
+//     // }
+//   }
+//   return {
+//     setting: defaultSetting,
+//     updatedSettingKeys,
+//   }
+// }
+
+export const mergeSetting = (originSetting: LX.AppSetting, targetSetting?: Partial<LX.AppSetting> | null): {
+  setting: LX.AppSetting
+  updatedSettingKeys: Array<keyof LX.AppSetting>
+  updatedSetting: Partial<LX.AppSetting>
+} => {
+  let originSettingCopy: LX.AppSetting = { ...originSetting }
+  // const defaultVersion = targetSettingCopy.version
+  const updatedSettingKeys: Array<keyof LX.AppSetting> = []
+  const updatedSetting: Partial<LX.AppSetting> = {}
+
+  if (targetSetting) {
+    const originSettingKeys = Object.keys(originSettingCopy)
+    const targetSettingKeys = Object.keys(targetSetting)
+
+    if (originSettingKeys.length > targetSettingKeys.length) {
+      for (const key of targetSettingKeys as Array<keyof LX.AppSetting>) {
+        const targetValue: any = targetSetting[key]
+        const isValidSettingValue = checkSettingValueType(targetValue)
+        // if (checkPrimitiveType(value)) {
+        if (!isValidSettingValue || checkSameSettingValue(targetValue, originSettingCopy[key]) || originSettingCopy[key] === undefined) continue
+        updatedSettingKeys.push(key)
+        updatedSetting[key] = targetValue
+        // @ts-expect-error
+        originSettingCopy[key] = targetValue
+        // } else {
+        //   if (!isPrimitive && currentValue != undefined) handleMergeSetting(value, currentValue)
+        // }
+      }
+    } else {
+      for (const key of originSettingKeys as Array<keyof LX.AppSetting>) {
+        const targetValue: any = targetSetting[key]
+        const isValidSettingValue = checkSettingValueType(targetValue)
+        // if (checkPrimitiveType(value)) {
+        if (!isValidSettingValue || checkSameSettingValue(targetValue, originSettingCopy[key])) continue
+        updatedSettingKeys.push(key)
+        updatedSetting[key] = targetValue
+        // @ts-expect-error
+        originSettingCopy[key] = targetValue
+        // } else {
+        //   if (!isPrimitive && currentValue != undefined) handleMergeSetting(value, currentValue)
+        // }
+      }
+    }
+  }
+
+  return {
+    setting: originSettingCopy,
+    updatedSettingKeys,
+    updatedSetting,
+  }
+}
+
+const normalizePlaybackSettingResult = (result: ReturnType<typeof mergeSetting>) => {
+  const normalized = normalizePlaybackSourceSetting(result.setting)
+  for (const [key, value] of Object.entries(normalized) as Array<
+  [keyof typeof normalized, (typeof normalized)[keyof typeof normalized]]
+  >) {
+    if (checkSameSettingValue(value, result.setting[key])) continue
+    result.setting[key] = value as never
+    result.updatedSetting[key] = value as never
+    if (!result.updatedSettingKeys.includes(key)) result.updatedSettingKeys.push(key)
+  }
+  return result
+}
+
+const applyInitSetting = (setting: LX.AppSetting) => {
+  if (global.envParams.cmdParams.hidden && !setting['tray.enable']) {
+    setting['tray.enable'] = true
+  }
+}
+
+type SettingsStore = ReturnType<typeof getStore>
+
+const createDefaultSettingsDocument = (): SettingsDocumentV1 => parseSettingsDocument({
+  version: defaultSetting.version,
+  setting: defaultSetting,
+})
+
+const readSettingsDocument = (store: SettingsStore): SettingsDocumentV1 => {
+  if (!store.has('setting')) return createDefaultSettingsDocument()
+
+  const value: Record<string, unknown> = {
+    version: store.get('version'),
+    setting: store.get('setting'),
+  }
+  if (store.has('storageSchemaVersion')) value.storageSchemaVersion = store.get('storageSchemaVersion')
+  if (store.has('catalogPreferences')) value.catalogPreferences = store.get('catalogPreferences')
+  return parseSettingsDocument(value)
+}
+
+const writeSettingsDocument = (store: SettingsStore, document: SettingsDocumentV1): void => {
+  store.override({
+    storageSchemaVersion: document.storageSchemaVersion,
+    version: document.version,
+    setting: document.setting,
+    catalogPreferences: document.catalogPreferences,
+  })
+}
+
+const updateSettingWithStore = (
+  electronStore_config: SettingsStore,
+  setting?: Partial<LX.AppSetting>,
+  isInit: boolean = false,
+) => {
+  const currentDocument = readSettingsDocument(electronStore_config)
+
+  let originSetting: LX.AppSetting
+  if (isInit) {
+    setting &&= migrateSetting(setting)
+    setting = sanitizeSettingUpdate(setting) ?? {}
+    setting = { ...setting, ...migratePerformanceSettings(setting) }
+    applyInitSetting(setting as LX.AppSetting)
+    originSetting = { ...defaultSetting }
+  } else {
+    assertNoWebDAVCredentialWrite(setting)
+    setting = sanitizeSettingUpdate(setting)
+    originSetting = {
+      ...global.lx.appSetting,
+      'webdav.username': '',
+      'webdav.password': '',
+    }
+    setting = normalizePerformancePatch(originSetting, setting ?? {}) as Partial<LX.AppSetting>
+  }
+
+  const result = normalizePlaybackSettingResult(mergeSetting(originSetting, setting))
+
+  result.setting.version = defaultSetting.version
+
+  const nextDocument = replaceOrdinarySettings(currentDocument, result.setting)
+  writeSettingsDocument(electronStore_config, nextDocument)
+  return result
+}
+
+export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean = false) => {
+  return updateSettingWithStore(getStore(STORE_NAMES.APP_SETTINGS), setting, isInit)
+}
+
+/** Publish runtime changes only after an atomic save succeeds. Rebase on concurrent writes. */
+export const updateSettingDurable = async(patch: Partial<LX.AppSetting>) => {
+  assertNoWebDAVCredentialWrite(patch)
+  const sanitized = sanitizeSettingUpdate(patch) ?? {}
+  let result!: ReturnType<typeof mergeSetting>
+  await getStore(STORE_NAMES.APP_SETTINGS).updateDurable(snapshot => {
+    const document = parseSettingsDocument(snapshot)
+    const current: LX.AppSetting = { ...defaultSetting, ...document.setting }
+    const normalized = normalizePerformancePatch(current, sanitized) as Partial<LX.AppSetting>
+    result = normalizePlaybackSettingResult(mergeSetting(current, normalized))
+    return { ...snapshot, ...replaceOrdinarySettings(document, result.setting) }
+  })
+  return result
+}
+
+export const updateCatalogPreferences = (preferences: CatalogPreferencesV1): SettingsDocumentV1 => {
+  const electronStore_config = getStore(STORE_NAMES.APP_SETTINGS)
+  const nextDocument = replaceCatalogPreferences(readSettingsDocument(electronStore_config), preferences)
+  writeSettingsDocument(electronStore_config, nextDocument)
+  return nextDocument
+}
+
+/**
+ * 初始化设置
+ */
+export const initSetting = async() => {
+  const electronStore_config = getStore(STORE_NAMES.APP_SETTINGS)
+
+  let setting = electronStore_config.get('setting') as LX.AppSetting | undefined
+
+  // migrate setting
+  if (!setting) {
+    const config = await parseDataFile<{ setting?: any }>('config.json')
+    if (config?.setting) setting = config.setting as LX.AppSetting
+    await migrateUserApi()
+  }
+
+  // console.log(setting)
+  return updateSettingWithStore(electronStore_config, setting, true)
+}
+
+/**
+ * 初始化快捷键设置
+ */
+export const initHotKey = async() => {
+  const electronStore_hotKey = getStore(STORE_NAMES.HOTKEY)
+
+  let localConfig = electronStore_hotKey.get('local') as LX.HotKeyConfig | null
+  let globalConfig = electronStore_hotKey.get('global') as LX.HotKeyConfig | null
+
+  if (globalConfig) {
+    // 移除v2.2.0及之前设置的全局媒体快捷键注册
+    if (globalConfig.keys.MediaPlayPause) {
+      delete globalConfig.keys.MediaPlayPause
+      delete globalConfig.keys.MediaNextTrack
+      delete globalConfig.keys.MediaPreviousTrack
+      electronStore_hotKey.set('global', globalConfig)
+    }
+  } else {
+    // migrate hotKey
+    const config = await migrateHotKey()
+    if (config) {
+      localConfig = config.local
+      globalConfig = config.global
+    } else {
+      localConfig = JSON.parse(JSON.stringify(defaultHotKey.local))
+      globalConfig = JSON.parse(JSON.stringify(defaultHotKey.global))
+    }
+
+    electronStore_hotKey.set('local', localConfig)
+    electronStore_hotKey.set('global', globalConfig)
+  }
+
+  return {
+    local: localConfig!,
+    global: globalConfig!,
+  }
+}
+
+type HotKeyType = 'local' | 'global'
+
+const saveHotKeyConfig = throttle<[LX.HotKeyConfigAll]>((config: LX.HotKeyConfigAll) => {
+  for (const key of Object.keys(config) as HotKeyType[]) {
+    global.lx.hotKey.config[key] = config[key]
+    getStore(STORE_NAMES.HOTKEY).set(key, config[key])
+  }
+})
+export const saveAppHotKeyConfig = (config: LX.HotKeyConfigAll) => {
+  saveHotKeyConfig(config)
+}
+
+export const openDevTools = (webContents: Electron.WebContents) => {
+  webContents.openDevTools({
+    mode: 'undocked',
+  })
+}
+
+
+let userThemes: LX.Theme[]
+let themeWriteTail: Promise<void> = Promise.resolve()
+
+const getUserThemes = (): LX.Theme[] => {
+  userThemes ??= getStore(STORE_NAMES.THEME).get('themes') as (LX.Theme[] | null) ?? []
+  return userThemes
+}
+
+export const getAllThemes = () => {
+  return {
+    themes,
+    userThemes: getUserThemes(),
+    dataPath: joinPath(global.storagePaths.profileRoot, 'assets', 'theme-images'),
+  }
+}
+
+const serializeThemeWrite = async<T>(operation: () => Promise<T>): Promise<T> => {
+  const result = themeWriteTail.then(operation)
+  themeWriteTail = result.then(() => undefined, () => undefined)
+  return result
+}
+
+const copyTheme = (theme: LX.Theme): LX.Theme => {
+  return {
+    ...theme,
+    config: {
+      ...theme.config,
+      extInfo: { ...theme.config.extInfo },
+      themeColors: { ...theme.config.themeColors },
+    },
+  }
+}
+
+const persistTheme = async(theme: LX.Theme): Promise<LX.ThemeSaveResult> => {
+  const canonicalTheme = copyTheme(theme)
+  const nextThemes = getUserThemes().map(copyTheme)
+  const index = nextThemes.findIndex(item => item.id == canonicalTheme.id)
+  if (index < 0) nextThemes.push(canonicalTheme)
+  else nextThemes.splice(index, 1, canonicalTheme)
+  await getStore(STORE_NAMES.THEME).setDurable('themes', nextThemes)
+  userThemes = nextThemes
+  return { theme: canonicalTheme, userThemes: nextThemes }
+}
+
+export const saveTheme = async(
+  input: LX.ThemeSaveRequest,
+  themeAssets: ThemeAssetManager,
+): Promise<LX.ThemeSaveResult> => serializeThemeWrite(async() => {
+  const theme = copyTheme(input.theme)
+  if (input.stagingId == null) return persistTheme(theme)
+  return themeAssets.promoteThemeImage({ stagingId: input.stagingId }, async promoted => {
+    theme.config.extInfo['--background-image'] = promoted.fileName
+    return persistTheme(theme)
+  })
+})
+
+export const removeTheme = async(id: string): Promise<LX.Theme[]> => serializeThemeWrite(async() => {
+  const currentThemes = getUserThemes()
+  const index = currentThemes.findIndex(theme => theme.id == id)
+  if (index < 0) return currentThemes
+  const nextThemes = currentThemes.map(copyTheme)
+  nextThemes.splice(index, 1)
+  await getStore(STORE_NAMES.THEME).setDurable('themes', nextThemes)
+  userThemes = nextThemes
+  return nextThemes
+})
+export const getTheme = () => {
+  // fs.promises.readdir()
+  const shouldUseDarkColors = nativeTheme.shouldUseDarkColors
+  let themeId = global.lx.appSetting['theme.id'] == 'auto'
+    ? shouldUseDarkColors
+      ? global.lx.appSetting['theme.darkId']
+      : global.lx.appSetting['theme.lightId']
+    : global.lx.appSetting['theme.id']
+  // themeId = 'naruto'
+  // themeId = 'pink'
+  // themeId = 'black'
+  let theme = themes.find(theme => theme.id == themeId)
+  if (!theme) {
+    userThemes = getStore(STORE_NAMES.THEME).get('themes') as LX.Theme[] | null ?? []
+    theme = userThemes.find(theme => theme.id == themeId)
+    if (theme) {
+      if (theme.config.extInfo['--background-image'] != 'none') {
+        theme = copyTheme(theme)
+        theme.config.extInfo['--background-image'] =
+          isUrl(theme.config.extInfo['--background-image'])
+            ? `url(${theme.config.extInfo['--background-image']})`
+            : `url(file:///${encodePath(joinPath(global.storagePaths.profileRoot, 'assets', 'theme-images', theme.config.extInfo['--background-image']))})`
+      }
+    } else {
+      themeId = global.lx.appSetting['theme.id'] == 'auto' && shouldUseDarkColors ? 'black' : 'green'
+      theme = themes.find(theme => theme.id == themeId) as LX.Theme
+    }
+  }
+
+  const colors: Record<string, string> = {
+    ...theme.config.themeColors,
+    ...theme.config.extInfo,
+  }
+  if (global.lx.appSetting['performance.simplifyVisuals']) colors['--background-image'] = 'none'
+
+  return {
+    shouldUseDarkColors,
+    theme: {
+      id: global.lx.appSetting['theme.id'],
+      name: theme.name,
+      isDark: theme.isDark,
+      isDarkFont: theme.isDarkFont,
+      colors,
+    },
+  }
+}
+
+let powerSaveBlockerId: number | null = null
+export const setPowerSaveBlocker = (enabled: boolean) => {
+  let isEnabled = powerSaveBlockerId != null && powerSaveBlocker.isStarted(powerSaveBlockerId)
+  if (enabled) {
+    if (isEnabled) return
+    powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+  } else {
+    if (!isEnabled) return
+    powerSaveBlocker.stop(powerSaveBlockerId!)
+    powerSaveBlockerId = null
+  }
+}
+
+
+let envProxy: null | { host: string, port: number } = null
+export const getProxy = () => {
+  if (global.lx.appSetting['network.proxy.enable'] && global.lx.appSetting['network.proxy.host']) {
+    return {
+      host: global.lx.appSetting['network.proxy.host'],
+      port: parseInt(global.lx.appSetting['network.proxy.port'] || '80'),
+    }
+  }
+  if (envProxy) {
+    return {
+      host: envProxy.host,
+      port: envProxy.port,
+    }
+  } else {
+    const envProxyStr = envParams.cmdParams['proxy-server']
+    if (envProxyStr && typeof envProxyStr == 'string') {
+      const [host, port = ''] = envProxyStr.split(':')
+      return envProxy = {
+        host,
+        port: parseInt(port || '80'),
+      }
+    }
+  }
+
+  return null
+}

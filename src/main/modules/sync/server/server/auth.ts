@@ -1,0 +1,142 @@
+import type http from 'http'
+import {
+  aesEncrypt,
+  aesDecrypt,
+  rsaEncrypt,
+  getIP,
+} from '../utils/tools'
+import querystring from 'node:querystring'
+import { getUserSpace, createClientKeyInfo } from '../user'
+import { toMD5 } from '../utils'
+import { getComputerName } from '../../utils'
+import { SYNC_CODE } from '@common/constants_sync'
+import { classifySyncClient } from '@common/runtimeIdentity'
+import { SYNC_PROTOCOLS, getSyncProtocol } from '@common/syncProtocol'
+
+const requestIps = new Map<string, number>()
+
+const getAvailableIP = (req: http.IncomingMessage) => {
+  let ip = getIP(req)
+  return ip && (requestIps.get(ip) ?? 0) < 10 ? ip : null
+}
+
+const verifyByKey = async(encryptMsg: string, userId: string) => {
+  const userSpace = getUserSpace()
+  const keyInfo = await userSpace.dataManage.getClientKeyInfo(userId)
+  if (!keyInfo) return null
+  let text
+  try {
+    text = aesDecrypt(encryptMsg, keyInfo.key)
+  } catch (err) {
+    return null
+  }
+  // console.log(text)
+  const protocol = getSyncProtocol(keyInfo.syncProtocol)
+  if (text.startsWith(protocol.syncAuthPrefix)) {
+    const deviceName = text.replace(protocol.syncAuthPrefix, '') || 'Unknown'
+    if (deviceName != keyInfo.deviceName) {
+      keyInfo.deviceName = deviceName
+      await userSpace.dataManage.saveClientKeyInfo(keyInfo)
+    }
+    return aesEncrypt(SYNC_CODE.helloMsg, keyInfo.key)
+  }
+  return null
+}
+
+const verifyByCode = async(encryptMsg: string, password: string) => {
+  let key = toMD5(password).substring(0, 16)
+  // const iv = Buffer.from(key.split('').reverse().join('')).toString('base64')
+  key = Buffer.from(key).toString('base64')
+  // console.log(req.headers.m, authCode, key)
+  let text
+  try {
+    text = aesDecrypt(encryptMsg, key)
+  } catch {
+    return null
+  }
+  // console.log(text)
+  const data = text.split('\n')
+  if (data.length != 4 || data.some(field => !field.trim())) return null
+  const protocol = SYNC_PROTOCOLS.find(
+    candidate => data[0] === candidate.syncAuthPrefix,
+  )
+  if (!protocol) return null
+  const publicKey = `-----BEGIN PUBLIC KEY-----\n${data[1]}\n-----END PUBLIC KEY-----`
+  const deviceName = data[2]
+  const client = classifySyncClient(data[3], protocol)
+  if (!client) return null
+  const keyInfo = createClientKeyInfo(deviceName, client.isMobile, protocol.id)
+  let response
+  try {
+    response = rsaEncrypt(Buffer.from(JSON.stringify({
+      clientId: keyInfo.clientId,
+      key: keyInfo.key,
+      serverName: getComputerName(),
+    })), publicKey)
+  } catch {
+    return null
+  }
+  const userSpace = getUserSpace()
+  await userSpace.dataManage.saveClientKeyInfo(keyInfo)
+  return response
+}
+
+export const authCode = async(req: http.IncomingMessage, res: http.ServerResponse, password: string) => {
+  let code = 401
+  let msg: string = SYNC_CODE.msgAuthFailed
+
+  let ip = getAvailableIP(req)
+  if (ip) {
+    if (typeof req.headers.m == 'string' && req.headers.m) {
+      const userId = req.headers.i
+      const _msg = typeof userId == 'string' && userId
+        ? await verifyByKey(req.headers.m, userId)
+        : await verifyByCode(req.headers.m, password)
+      if (_msg != null) {
+        msg = _msg
+        code = 200
+      }
+    }
+
+    if (code != 200) {
+      const num = requestIps.get(ip) ?? 0
+      // if (num > 20) return
+      requestIps.set(ip, num + 1)
+    }
+  } else {
+    code = 403
+    msg = SYNC_CODE.msgBlockedIp
+  }
+  // console.log(req.headers)
+
+  res.writeHead(code)
+  res.end(msg)
+}
+
+const verifyConnection = async(encryptMsg: string, userId: string) => {
+  const userSpace = getUserSpace()
+  const keyInfo = await userSpace.dataManage.getClientKeyInfo(userId)
+  if (!keyInfo) return false
+  let text
+  try {
+    text = aesDecrypt(encryptMsg, keyInfo.key)
+  } catch (err) {
+    return false
+  }
+  // console.log(text)
+  return text == getSyncProtocol(keyInfo.syncProtocol).syncConnectMessage
+}
+export const authConnect = async(req: http.IncomingMessage) => {
+  let ip = getAvailableIP(req)
+  if (ip) {
+    const query = querystring.parse((req.url!).split('?')[1])
+    const i = query.i
+    const t = query.t
+    if (typeof i == 'string' && typeof t == 'string' && await verifyConnection(t, i)) return
+
+    const num = requestIps.get(ip) ?? 0
+    requestIps.set(ip, num + 1)
+  }
+  throw new Error('failed')
+}
+

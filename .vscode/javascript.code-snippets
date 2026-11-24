@@ -1,0 +1,22 @@
+{
+  "use i18n": {
+		"prefix": "ui18n",
+		"body": [
+			"import { useI18n } from '@renderer/plugins/i18n'",
+			"${1:const t = useI18n()}"
+		],
+		"description": "starky-lx-music-desktop workspace snippet"
+	},
+  "list action": {
+		"prefix": "listacion",
+		"body": [
+			"import { $1 } from '@renderer/store/list/action'"
+		]
+	},
+  "import vue tools": {
+		"prefix": "imvt",
+		"body": [
+			"import { $1 } from '@common/utils/vueTools'"
+		]
+	}
+}

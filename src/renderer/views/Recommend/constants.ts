@@ -1,0 +1,14 @@
+export const LOGIN_QR_PENDING_CODES = new Set([801, 802])
+export const HOME_RECOMMEND_PLAYLIST_LIMIT = 48
+export const HOME_SONG_LIMIT = 12
+export const EXPLORE_PLAYLIST_LIMIT = 100
+export const PRIVATE_FM_CARD_ID = 'private_fm'
+export const PRIVATE_RADAR_PLAYLIST_ID = '3136952023'
+export const SPECIAL_PLACEHOLDER_ID = 'special_placeholder'
+export const HOME_STYLE_SONGS_TEMP_LIST_ID = 'wy__home_style_songs'
+export const HOME_SIMILAR_SONGS_TEMP_LIST_ID = 'wy__home_similar_songs'
+export const QQ_GUESS_LIKE_CARD_ID = 'qq_guess_like'
+export const QQ_GUESS_LIKE_TEMP_LIST_ID = 'tx__qq_guess_like'
+export const QQ_BRUSH_MODE_CARD_ID = 'qq_brush_mode'
+export const QQ_BRUSH_MODE_TEMP_LIST_ID = 'tx__qq_brush_mode'
+export const RECOMMEND_CACHE_TTL = Number.POSITIVE_INFINITY

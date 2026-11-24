@@ -1,0 +1,39 @@
+name: Build Windows Green (x64)
+
+on:
+  workflow_dispatch:
+
+env:
+  IS_CI: 'true'
+
+jobs:
+  build:
+    name: Windows x64 Green
+    runs-on: windows-latest
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+
+      - name: Get npm cache directory
+        shell: pwsh
+        run: echo "NPM_CACHE=$(npm config get cache)" >> $env:GITHUB_ENV
+
+      - name: Setup Node Env
+        uses: ./.github/actions/setup
+
+      - name: Build src code
+        run: npm run build
+
+      - name: Build Package 7z x64
+        run: npm run pack:win:7z:x64
+
+      - name: List outputs
+        shell: pwsh
+        run: Get-ChildItem build -Force | Select-Object Name,Length
+
+      - name: Upload Green 7z
+        uses: actions/upload-artifact@v4
+        with:
+          name: lx-music-desktop-custom-win_x64-green
+          path: build/*win_x64-green.7z
+          if-no-files-found: error

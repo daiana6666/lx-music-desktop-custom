@@ -1,0 +1,457 @@
+<template>
+  <div :class="$style.songList">
+    <!-- <transition enter-active-class="animated-fast fadeIn" leave-active-class="animated-fast fadeOut"> -->
+    <div :class="$style.list">
+      <online-list-header
+        v-if="!$slots.header"
+        :action-buttons-visible="actionButtonsVisible"
+        :artwork-size="artworkSize"
+      />
+      <div :class="$style.content">
+        <div v-show="!noItem || $slots.header" ref="dom_listContent" :class="$style.content">
+          <base-virtualized-list v-if="actionButtonsVisible" ref="listRef" :list="virtualList" key-name="id" :item-height="listItemHeight" container-class="scroll" content-class="list" @contextmenu.capture="handleListRightClick">
+            <template v-if="$slots.header" #header>
+              <slot name="header" />
+              <online-list-header
+                :action-buttons-visible="actionButtonsVisible"
+                :artwork-size="artworkSize"
+              />
+            </template>
+            <template #default="{ item, index }">
+              <div
+                class="list-item" :class="[{ selected: rightClickSelectedIndex == index }, { active: selectedList.includes(item) }]"
+                @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
+              >
+                <div class="list-item-cell no-select num" style="flex: 0 0 5%;" @click.stop>
+                  <transition name="play-active">
+                    <div v-if="isCurrentPlayingRow(item, index)" :class="$style.playIcon">
+                      <svg-icon name="headphones" :class="$style.headphoneIcon" />
+                    </div>
+                    <div v-else class="num">{{ index + 1 }}</div>
+                  </transition>
+                </div>
+                <div class="list-item-cell auto name">
+                  <material-music-title-cell :music-info="item" :title="item.name" :artist="item.singer" :artwork-size="artworkSize">
+                    <span v-if="item.meta._qualitys?.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
+                    <span v-else-if="item.meta._qualitys?.ape || item.meta._qualitys?.flac || item.meta._qualitys?.wav" class="no-select badge badge-theme-primary">{{ $t('tag__lossless') }}</span>
+                    <span v-else-if="item.meta._qualitys?.['320k']" class="no-select badge badge-theme-secondary">{{ $t('tag__high_quality') }}</span>
+                    <span v-if="sourceTag" class="no-select badge badge-theme-tertiary">{{ item.source }}</span>
+                  </material-music-title-cell>
+                </div>
+                <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
+                <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
+                <div class="list-item-cell" style="flex: 0 0 16%; padding-left: 0; padding-right: 0;">
+                  <material-list-buttons :class="$style.actionButtons" :index="index" :remove-btn="false" :download-btn="canOpenPrimaryDownload(item.source)" :play-btn="checkApiSource ? canStartPlayback(item.source) : true" @btn-click="handleListBtnClick" />
+                </div>
+              </div>
+            </template>
+            <template #footer>
+              <div v-if="$slots.header && noItem" :class="$style.scrollNoitem">
+                <p v-text="noItem" />
+              </div>
+              <div v-else :class="$style.pagination">
+                <material-pagination :count="total" :limit="limit" :page="page" @btn-click="$emit('togglePage', $event)" />
+              </div>
+            </template>
+          </base-virtualized-list>
+          <base-virtualized-list v-else ref="listRef" :list="virtualList" key-name="id" :item-height="listItemHeight" container-class="scroll" content-class="list" @contextmenu.capture="handleListRightClick">
+            <template v-if="$slots.header" #header>
+              <slot name="header" />
+              <online-list-header
+                :action-buttons-visible="actionButtonsVisible"
+                :artwork-size="artworkSize"
+              />
+            </template>
+            <template #default="{ item, index }">
+              <div
+                class="list-item" :class="[{ selected: rightClickSelectedIndex == index }, { active: selectedList.includes(item) }]"
+                @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
+              >
+                <div class="list-item-cell no-select num" style="flex: 0 0 5%;" @click.stop>
+                  <transition name="play-active">
+                    <div v-if="isCurrentPlayingRow(item, index)" :class="$style.playIcon">
+                      <svg-icon name="headphones" :class="$style.headphoneIcon" />
+                    </div>
+                    <div v-else class="num">{{ index + 1 }}</div>
+                  </transition>
+                </div>
+                <div class="list-item-cell auto name">
+                  <material-music-title-cell :music-info="item" :title="item.name" :artist="item.singer" :artwork-size="artworkSize">
+                    <span v-if="item.meta._qualitys?.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
+                    <span v-else-if="item.meta._qualitys?.ape || item.meta._qualitys?.flac || item.meta._qualitys?.wav" class="no-select badge badge-theme-primary">{{ $t('tag__lossless') }}</span>
+                    <span v-else-if="item.meta._qualitys?.['320k']" class="no-select badge badge-theme-secondary">{{ $t('tag__high_quality') }}</span>
+                    <span v-if="sourceTag" class="no-select badge badge-theme-tertiary">{{ item.source }}</span>
+                  </material-music-title-cell>
+                </div>
+                <div class="list-item-cell" style="flex: 0 0 27%;"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
+                <div class="list-item-cell" style="flex: 0 0 10%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
+              </div>
+            </template>
+            <template #footer>
+              <div v-if="$slots.header && noItem" :class="$style.scrollNoitem">
+                <p v-text="noItem" />
+              </div>
+              <div v-else :class="$style.pagination">
+                <material-pagination :count="total" :limit="limit" :page="page" @btn-click="$emit('togglePage', $event)" />
+              </div>
+            </template>
+          </base-virtualized-list>
+        </div>
+        <transition enter-active-class="animated fadeIn" leave-active-class="animated fadeOut">
+          <div v-show="noItem && !$slots.header" :class="$style.noitem">
+            <p v-text="noItem" />
+          </div>
+        </transition>
+      </div>
+    </div>
+    <!-- </transition> -->
+    <!-- <material-flow-btn :show="isShowEditBtn && assertApiSupport(source)" :remove-btn="false" @btn-click="handleFlowBtnClick" /> -->
+    <!-- <common-download-modal v-model:show="isShowDownload" :music-info="selectedDownloadMusicInfo" teleport="#view" />
+    <common-download-multiple-modal v-model:show="isShowDownloadMultiple" :list="selectedList" teleport="#view" @confirm="removeAllSelect" /> -->
+    <common-list-add-modal v-model:show="isShowListAdd" :music-info="selectedAddMusicInfo" teleport="#view" />
+    <common-list-add-multiple-modal v-model:show="isShowListAddMultiple" :music-list="selectedList" teleport="#view" @confirm="removeAllSelect" />
+    <common-download-modal v-model:show="isShowDownload" :music-info="selectedDownloadMusicInfo" teleport="#view" />
+    <common-download-multiple-modal v-model:show="isShowDownloadMultiple" :list="selectedList" teleport="#view" @confirm="removeAllSelect" />
+    <base-menu v-model="isShowItemMenu" :menus="menus" :xy="menuLocation" item-name="name" @menu-click="handleMenuClick" />
+  </div>
+</template>
+
+<script>
+import { clipboardWriteText } from '@common/utils/electron'
+import { canOpenPrimaryDownload, canStartPlayback } from '@renderer/store/utils'
+import { computed, ref } from '@common/utils/vueTools'
+import useList from './useList'
+import useMenu from './useMenu'
+import usePlay from './usePlay'
+import useMusicDownload from './useMusicDownload'
+import useMusicAdd from './useMusicAdd'
+import useMusicActions from './useMusicActions'
+import { appSetting } from '@renderer/store/setting'
+import { playInfo, playMusicInfo } from '@renderer/store/player/state'
+import { tempListMeta } from '@renderer/store/list/state'
+import { LIST_IDS } from '@common/constants'
+import OnlineListHeader from './Header.vue'
+
+const createMusicIdentity = musicInfo => {
+  if (!musicInfo) return ''
+  const targetMusicInfo = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
+  return `${targetMusicInfo.source}:${targetMusicInfo.id}`
+}
+
+export default {
+  name: 'MaterialOnlineList',
+  components: {
+    OnlineListHeader,
+  },
+  props: {
+    list: {
+      type: Array,
+      default() {
+        return []
+      },
+    },
+    page: {
+      type: Number,
+      required: true,
+    },
+    limit: {
+      type: Number,
+      required: true,
+    },
+    total: {
+      type: Number,
+      required: true,
+    },
+    sourceTag: {
+      type: Boolean,
+      default: false,
+    },
+    noItem: {
+      type: String,
+      default: '',
+    },
+    checkApiSource: {
+      type: Boolean,
+      default: false,
+    },
+    directListAdd: {
+      type: Boolean,
+      default: false,
+    },
+    directListPlay: {
+      type: Boolean,
+      default: false,
+    },
+    listContextId: {
+      type: String,
+      default: '',
+    },
+    localMusicUpload: {
+      type: Boolean,
+      default: false,
+    },
+  },
+  emits: ['show-menu', 'play-list', 'togglePage', 'list-add', 'upload-webdav'],
+  setup(props, { emit }) {
+    const actionButtonsVisible = appSetting['list.actionButtonsVisible']
+    const rightClickSelectedIndex = ref(-1)
+    const dom_listContent = ref(null)
+    const listRef = ref(null)
+    const virtualList = computed(() => props.noItem ? [] : props.list)
+    const currentMusicIdentity = computed(() => createMusicIdentity(playMusicInfo.musicInfo))
+    const isCurrentTempList = computed(() => {
+      return playInfo.playerListId == LIST_IDS.TEMP &&
+        !!props.listContextId &&
+        tempListMeta.id == props.listContextId
+    })
+
+    const {
+      selectedList,
+      listItemHeight,
+      artworkSize,
+      handleSelectData,
+      removeAllSelect,
+    } = useList({ props, listRef })
+
+    const {
+      handlePlayMusic,
+      handlePlayMusicLater,
+      doubleClickPlay,
+    } = usePlay({ selectedList, props, removeAllSelect, emit })
+
+    const {
+      isShowListAdd,
+      isShowListAddMultiple,
+      selectedAddMusicInfo,
+      handleShowMusicAddModal,
+    } = useMusicAdd({ selectedList, props })
+
+    const handleListAdd = (index, single = false) => {
+      if (!props.directListAdd) {
+        handleShowMusicAddModal(index, single)
+        return
+      }
+
+      if (selectedList.value.length && !single) {
+        emit('list-add', [...selectedList.value])
+        removeAllSelect()
+        return
+      }
+
+      const musicInfo = props.list[index]
+      if (!musicInfo) return
+      emit('list-add', [musicInfo])
+    }
+
+    const {
+      isShowDownload,
+      isShowDownloadMultiple,
+      selectedDownloadMusicInfo,
+      handleShowDownloadModal,
+    } = useMusicDownload({ selectedList, props })
+
+    const {
+      handleSearch,
+      handleOpenMusicDetail,
+      handleDislikeMusic,
+    } = useMusicActions({ props })
+
+    const {
+      menus,
+      menuLocation,
+      isShowItemMenu,
+      showMenu,
+      menuClick,
+    } = useMenu({
+      props,
+      canStartPlayback,
+      canOpenPrimaryDownload,
+      emit,
+
+      handleShowDownloadModal,
+      handlePlayMusic,
+      handlePlayMusicLater,
+      handleSearch,
+      handleShowMusicAddModal: handleListAdd,
+      handleOpenMusicDetail,
+      handleDislikeMusic,
+    })
+
+    const handleListItemClick = (event, index) => {
+      if (rightClickSelectedIndex.value > -1) return
+      handleSelectData(index)
+      doubleClickPlay(index)
+    }
+    const handleListItemRightClick = (event, index) => {
+      rightClickSelectedIndex.value = index
+      showMenu(event, props.list[index], index)
+    }
+    const handleMenuClick = (action) => {
+      let index = rightClickSelectedIndex.value
+      rightClickSelectedIndex.value = -1
+      menuClick(action, index)
+    }
+    const handleListRightClick = (event) => {
+      if (!event.target.classList.contains('select')) return
+      event.stopImmediatePropagation()
+      let classList = dom_listContent.value.classList
+      classList.add('copying')
+      window.requestAnimationFrame(() => {
+        let str = window.getSelection().toString()
+        classList.remove('copying')
+        str = str.split(/\n\n/).map(s => s.replace(/\n/g, '  ')).join('\n').trim()
+        if (!str.length) return
+        clipboardWriteText(str)
+      })
+    }
+    const handleListBtnClick = ({ action, index }) => {
+      switch (action) {
+        case 'download':
+          handleShowDownloadModal(index, true)
+          break
+        case 'play':
+          void handlePlayMusic(index, true)
+          break
+        case 'search':
+          handleSearch(index)
+          break
+        case 'listAdd':
+          handleListAdd(index, true)
+          break
+      }
+    }
+    const scrollToTop = () => {
+      listRef.value.scrollTo(0, true)
+    }
+    const isCurrentPlayingRow = (musicInfo, index) => {
+      if (isCurrentTempList.value && playInfo.playerPlayIndex === index) return true
+      if (!currentMusicIdentity.value) return false
+      return createMusicIdentity(musicInfo) == currentMusicIdentity.value
+    }
+
+    return {
+      listItemHeight,
+      artworkSize,
+      handleListItemClick,
+      selectedList,
+      handleListItemRightClick,
+      removeAllSelect,
+      handleListBtnClick,
+      rightClickSelectedIndex,
+      dom_listContent,
+      listRef,
+      virtualList,
+
+      menus,
+      isShowItemMenu,
+      menuLocation,
+      handleMenuClick,
+
+      handleListRightClick,
+      canStartPlayback,
+      canOpenPrimaryDownload,
+
+      isShowListAdd,
+      isShowListAddMultiple,
+      selectedAddMusicInfo,
+
+      isShowDownload,
+      isShowDownloadMultiple,
+      selectedDownloadMusicInfo,
+
+      scrollToTop,
+      actionButtonsVisible,
+      isCurrentPlayingRow,
+    }
+  },
+}
+</script>
+
+
+<style lang="less" module>
+@import '@renderer/assets/styles/layout.less';
+.songList {
+  overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-flow: column nowrap;
+  position: relative;
+}
+
+.list {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-flow: column nowrap;
+  font-size: 14px;
+}
+
+.content {
+  flex: auto;
+  min-height: 0;
+  position: relative;
+  height: 100%;
+}
+
+.pagination {
+  text-align: center;
+  padding: 15px 0;
+  // left: 50%;
+  // transform: translateX(-50%);
+}
+.noitem {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-flow: column nowrap;
+  justify-content: center;
+  align-items: center;
+  // background-color: var(--color-000);
+
+  p {
+    font-size: 24px;
+    color: var(--color-font-label);
+  }
+}
+.scrollNoitem {
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  p {
+    font-size: 24px;
+    color: var(--color-font-label);
+  }
+}
+.playIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 1em;
+}
+.headphoneIcon {
+  width: 15px;
+  height: 15px;
+  color: var(--color-primary);
+  vertical-align: middle;
+}
+
+@media (max-width: 900px) {
+  .actionButtons {
+    :global(button) {
+      margin-right: 1px;
+      padding-left: 3px;
+      padding-right: 3px;
+    }
+  }
+}
+
+</style>

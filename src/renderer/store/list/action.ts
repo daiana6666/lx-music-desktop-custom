@@ -1,0 +1,233 @@
+// import {  } from '@renderer/utils/ipc'
+
+import { appSetting } from '@renderer/store/setting'
+import { fetchingListStatus, listUpdateTimes, allMusicList, userLists, tempListMeta } from './state'
+import {
+  registerListAction,
+  createUserList as createUserListAction,
+  addListMusics as addListMusicsAction,
+  moveListMusics as moveListMusicsAction,
+  overwriteListMusics,
+} from '@renderer/store/list/listManage'
+import { setMusicList, stageMusicList } from '@renderer/store/list/listManage/action'
+import { toRaw } from '@common/utils/vueTools'
+import { LIST_IDS } from '@common/constants'
+import { likeNeteaseMusic, likeQQMusic, listWebDAVMusics, uploadLocalMusicToWebDAV } from '@renderer/utils/ipc'
+import { log } from '@common/utils'
+import { resolveUserListGroup } from '@common/listGroup'
+import { cacheUserListGroup, requestUserListReveal, setUserListGroup } from './group'
+
+const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
+
+export const syncNeteaseLikedMusics = async(musicInfos: LX.Music.MusicInfo[]) => {
+  const neteaseMusics = toCloneable(musicInfos).filter(musicInfo => musicInfo.source == 'wy')
+  if (!neteaseMusics.length) return
+
+  await Promise.all(neteaseMusics.map(async musicInfo => {
+    await likeNeteaseMusic(musicInfo)
+  }))
+}
+
+export const syncQQMusicLikedMusics = async(musicInfos: LX.Music.MusicInfo[]) => {
+  const qqMusics = toCloneable(musicInfos)
+    .filter((musicInfo): musicInfo is LX.Music.MusicInfo_tx => musicInfo.source == 'tx')
+  if (!qqMusics.length) return
+
+  const results = await Promise.allSettled(qqMusics.map(async musicInfo => {
+    await likeQQMusic(musicInfo)
+  }))
+  for (const result of results) {
+    if (result.status == 'rejected') {
+      console.warn('Sync QQ Music liked music failed')
+    }
+  }
+}
+
+export const registerAction = (onListChanged: (listIds: string[]) => void) => {
+  return registerListAction(appSetting, onListChanged)
+}
+
+/**
+ * 从缓存获取列表内歌曲，前提是知道列表之前已被获取过，否则返回空数组
+ * 只对已用 retainMusicList 保持的列表可靠。
+ * @param listId 列表ID
+ * @returns
+ */
+export const getListMusicsFromCache = (listId: string | null): LX.Music.MusicInfo[] => {
+  if (!listId) return []
+  if (allMusicList.has(listId)) return allMusicList.get(listId) as LX.Music.MusicInfo[]
+  return []
+}
+
+export const setFetchingListStatus = (id: string, status: boolean) => {
+  fetchingListStatus[id] = status
+}
+
+export const setUpdateTime = (id: string, time: string) => {
+  listUpdateTimes[id] = time
+}
+
+export const refreshWebDAVList = async() => {
+  setFetchingListStatus(LIST_IDS.WEBDAV, true)
+  try {
+    const musicInfos = await listWebDAVMusics()
+    await overwriteListMusics({
+      listId: LIST_IDS.WEBDAV,
+      musicInfos,
+    })
+    setUpdateTime(LIST_IDS.WEBDAV, new Date().toLocaleString())
+    return musicInfos
+  } finally {
+    setFetchingListStatus(LIST_IDS.WEBDAV, false)
+  }
+}
+
+const shouldConvertLocalMusicToWebDAV = (id: string) => {
+  if (id == LIST_IDS.DEFAULT || id == LIST_IDS.LOVE) return true
+  return userLists.some(list => list.id == id)
+}
+
+const upsertWebDAVListCache = (musicInfos: LX.Music.MusicInfoWebDAV[]) => {
+  if (!musicInfos.length) return
+  const currentList = allMusicList.get(LIST_IDS.WEBDAV) ?? setMusicList(LIST_IDS.WEBDAV, [])
+  const existsIds = new Set(currentList.map(musicInfo => musicInfo.id))
+  const appendList = musicInfos.filter(musicInfo => !existsIds.has(musicInfo.id))
+  if (!appendList.length) return
+  currentList.unshift(...appendList)
+  setUpdateTime(LIST_IDS.WEBDAV, new Date().toLocaleString())
+  window.app_event.myListUpdate([LIST_IDS.WEBDAV])
+}
+
+const convertLocalMusicsToWebDAV = async(musicInfos: LX.Music.MusicInfo[]) => {
+  const uploadedWebDAVMusics: LX.Music.MusicInfoWebDAV[] = []
+  const convertedList: LX.Music.MusicInfo[] = []
+  try {
+    for (const musicInfo of musicInfos) {
+      if (musicInfo.source != 'local') {
+        convertedList.push(musicInfo)
+        continue
+      }
+      const webDAVMusicInfo = await uploadLocalMusicToWebDAV(musicInfo)
+      uploadedWebDAVMusics.push(webDAVMusicInfo)
+      convertedList.push(webDAVMusicInfo)
+    }
+    return convertedList
+  } finally {
+    upsertWebDAVListCache(uploadedWebDAVMusics)
+  }
+}
+
+export const addListMusics = async(id: string, musicInfos: LX.Music.MusicInfo[], addMusicLocationType?: LX.AddMusicLocationType, options?: {
+  waitNeteaseSync?: boolean
+  skipNeteaseSync?: boolean
+  waitQQMusicSync?: boolean
+  skipQQMusicSync?: boolean
+  skipLocalWebDAVSync?: boolean
+}) => {
+  let rawMusicInfos = toCloneable(musicInfos)
+  if (!options?.skipLocalWebDAVSync && shouldConvertLocalMusicToWebDAV(id) && rawMusicInfos.some(musicInfo => musicInfo.source == 'local')) {
+    rawMusicInfos = await convertLocalMusicsToWebDAV(rawMusicInfos)
+  }
+  const result = await addListMusicsAction({
+    id,
+    musicInfos: rawMusicInfos,
+    addMusicLocationType: addMusicLocationType ?? appSetting['list.addMusicLocationType'],
+  })
+  if (id == LIST_IDS.LOVE && !options?.skipNeteaseSync) {
+    const syncPromise = syncNeteaseLikedMusics(rawMusicInfos)
+    if (options?.waitNeteaseSync) {
+      await syncPromise
+    } else {
+      void syncPromise.catch(err => {
+        console.warn('Sync Netease liked music failed:', err)
+      })
+    }
+  }
+  if (id == LIST_IDS.LOVE && !options?.skipQQMusicSync) {
+    const syncPromise = syncQQMusicLikedMusics(rawMusicInfos)
+    if (options?.waitQQMusicSync) {
+      await syncPromise
+    } else {
+      void syncPromise.catch(() => {
+        console.warn('Sync QQ Music liked music failed')
+      })
+    }
+  }
+  return result
+}
+
+export const moveListMusics = async(fromId: string, toId: string, musicInfos: LX.Music.MusicInfo[], addMusicLocationType?: LX.AddMusicLocationType) => {
+  return moveListMusicsAction({
+    fromId,
+    toId,
+    musicInfos: toRaw(musicInfos),
+    addMusicLocationType: addMusicLocationType ?? appSetting['list.addMusicLocationType'],
+  })
+}
+
+export const createUserList = async({ name, id = `userlist_${Date.now()}`, list = [], source, sourceListId, position = -1, group, strictGroupPersistence = false, reveal = true }: {
+  name?: string
+  id?: string
+  list?: LX.Music.MusicInfo[]
+  source?: LX.OnlineSource
+  sourceListId?: string
+  position?: number
+  group?: LX.List.UserListGroup
+  strictGroupPersistence?: boolean
+  reveal?: boolean
+}): Promise<string> => {
+  const listInfo: LX.List.UserListInfo = {
+    id,
+    name: name ?? 'list',
+    source,
+    sourceListId,
+    locationUpdateTime: position < 0 ? null : Date.now(),
+  }
+  await createUserListAction({
+    position: position < 0 ? userLists.length : position,
+    listInfos: [listInfo],
+  })
+  const assignedGroup = resolveUserListGroup(listInfo, group)
+  if (strictGroupPersistence) {
+    await setUserListGroup(id, assignedGroup)
+  } else {
+    cacheUserListGroup(id, assignedGroup)
+    await setUserListGroup(id, assignedGroup).catch(error => {
+      log.error(error)
+    })
+  }
+  if (list.length) await addListMusics(id, list)
+  if (reveal) requestUserListReveal(id)
+  return id
+}
+
+
+export const setTempList = async(id: string, list: LX.Music.MusicInfo[]) => {
+  tempListMeta.id = id
+  stageMusicList(LIST_IDS.TEMP, list)
+  await overwriteListMusics({
+    listId: LIST_IDS.TEMP,
+    musicInfos: list,
+  })
+}
+
+export {
+  addListMusicsAction,
+  moveListMusicsAction,
+}
+
+export {
+  getUserLists,
+  removeUserList,
+  updateUserList,
+  updateUserListPosition,
+  getListMusics,
+  removeListMusics,
+  updateListMusics,
+  updateListMusicsPosition,
+  overwriteListMusics,
+  clearListMusics,
+  overwriteListFull,
+  checkListExistMusic,
+  getMusicExistListIds,
+} from '@renderer/store/list/listManage'

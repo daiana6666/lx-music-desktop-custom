@@ -1,0 +1,93 @@
+// if (targetSong.key) { // 如果是已下载的歌曲
+//   const filePath = path.join(appSetting['download.savePath'], targetSong.metadata.fileName)
+//   // console.log(filePath)
+
+import {
+  getPrimaryMusicUrl as getOnlineMusicUrl,
+  getPicUrl as getOnlinePicUrl,
+  getLyricInfo as getOnlineLyricInfo,
+} from './online'
+import {
+  getPrimaryMusicUrl as getDownloadMusicUrl,
+  getPicUrl as getDownloadPicUrl,
+  getLyricInfo as getDownloadLyricInfo,
+} from './download'
+import {
+  getPrimaryMusicUrl as getLocalMusicUrl,
+  getPicUrl as getLocalPicUrl,
+  getLyricInfo as getLocalLyricInfo,
+} from './local'
+import {
+  getMusicUrl as getWebDAVMusicUrl,
+  getPicUrl as getWebDAVPicUrl,
+  getLyricInfo as getWebDAVLyricInfo,
+} from './webdav'
+
+export { createPlaybackRequest } from './playback'
+
+
+export const getMusicUrl = async({
+  musicInfo,
+  quality,
+  isRefresh = false,
+  onToggleSource,
+  allowToggleSource,
+}: {
+  musicInfo: LX.Music.MusicInfo | LX.Download.ListItem
+  isRefresh?: boolean
+  quality?: LX.Quality
+  onToggleSource?: (musicInfo?: LX.Music.MusicInfoOnline) => void
+  allowToggleSource?: boolean
+}): Promise<LX.Music.PlayableMusicUrlResult> => {
+  if ('progress' in musicInfo) {
+    return { url: await getDownloadMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource }) }
+  } else if (musicInfo.source == 'local') {
+    return { url: await getLocalMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource }) }
+  } else if (musicInfo.source == 'webdav') {
+    return { url: await getWebDAVMusicUrl({ musicInfo, isRefresh }) }
+  } else {
+    return getOnlineMusicUrl({ musicInfo, isRefresh, quality, onToggleSource, allowToggleSource })
+  }
+}
+
+export const getPicPath = async({
+  musicInfo,
+  isRefresh = false,
+  listId,
+  onToggleSource,
+}: {
+  musicInfo: LX.Music.MusicInfo | LX.Download.ListItem
+  listId?: string | null
+  isRefresh?: boolean
+  onToggleSource?: (musicInfo?: LX.Music.MusicInfoOnline) => void
+}): Promise<string> => {
+  if ('progress' in musicInfo) {
+    return getDownloadPicUrl({ musicInfo, isRefresh, listId, onToggleSource })
+  } else if (musicInfo.source == 'local') {
+    return getLocalPicUrl({ musicInfo, isRefresh, listId, onToggleSource })
+  } else if (musicInfo.source == 'webdav') {
+    return getWebDAVPicUrl({ musicInfo, isRefresh, listId })
+  } else {
+    return getOnlinePicUrl({ musicInfo, isRefresh, listId, onToggleSource })
+  }
+}
+
+export const getLyricInfo = async({
+  musicInfo,
+  isRefresh = false,
+  onToggleSource,
+}: {
+  musicInfo: LX.Music.MusicInfo | LX.Download.ListItem
+  isRefresh?: boolean
+  onToggleSource?: (musicInfo?: LX.Music.MusicInfoOnline) => void
+}): Promise<LX.Player.LyricInfo> => {
+  if ('progress' in musicInfo) {
+    return getDownloadLyricInfo({ musicInfo, isRefresh, onToggleSource })
+  } else if (musicInfo.source == 'local') {
+    return getLocalLyricInfo({ musicInfo, isRefresh, onToggleSource })
+  } else if (musicInfo.source == 'webdav') {
+    return getWebDAVLyricInfo({ musicInfo, isRefresh })
+  } else {
+    return getOnlineLyricInfo({ musicInfo, isRefresh, onToggleSource })
+  }
+}
