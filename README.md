@@ -1,6 +1,6 @@
 # LX Music Desktop
 
-本仓库是由 `starkyYourEyes` 维护的 LX Music 桌面定制版。显示名称和现有图标继续使用 LX Music，技术标识、发布目标、数据目录、深链、同步身份与备份扩展名由本仓库独立维护。
+本仓库是由 `daiana6666` 基于 [`starkyYourEyes/lx-music-desktop`](https://github.com/starkyYourEyes/lx-music-desktop) 二次定制的 LX Music 桌面版；而该 fork 又基于 [`lyswhut/lx-music-desktop`](https://github.com/lyswhut/lx-music-desktop)。显示名称和现有图标继续使用 LX Music，技术标识、发布目标、数据目录、深链、同步身份与备份扩展名由本仓库独立维护。完整的归属链见 [UPSTREAM.md](./UPSTREAM.md)。
 
 ## 当前功能
 
@@ -54,4 +54,4 @@ npm run pack:dir
 
 代码继续按 [Apache License 2.0](./LICENSE) 发布，应用内补充协议与第三方许可证保留在 [`licenses/`](./licenses/) 目录。
 
-本项目基于 [lyswhut/lx-music-desktop](https://github.com/lyswhut/lx-music-desktop) v2.12.1，感谢原作者及贡献者。基线之后的修改和发布由当前维护者负责，详细说明见 [UPSTREAM.md](./UPSTREAM.md)。
+归属链：[lyswhut/lx-music-desktop](https://github.com/lyswhut/lx-music-desktop) v2.12.1（原作者及贡献者）→ [starkyYourEyes/lx-music-desktop](https://github.com/starkyYourEyes/lx-music-desktop)（推荐页、听歌时长等功能）→ 本仓库（个人定制与本地修复）。各层维护者对其各自修改负责，详细说明见 [UPSTREAM.md](./UPSTREAM.md)。
